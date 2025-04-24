@@ -17,6 +17,13 @@ DATABASE = os.getenv("DATABASE")
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 
 # Events
+@bot.event
+async def on_ready():
+    print(f"🟢 | Bot is live")
+
+
+    await bot.tree.sync()
+    print(f"🟢 | Bot tree synced")
 
 # Functions
 
