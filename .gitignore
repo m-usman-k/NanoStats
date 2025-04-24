@@ -1,0 +1,11 @@
+# Files
+.env
+config.txt
+
+# Folders
+/venv
+/__pycache__/
+
+
+# Subfolders
+*/__pycache__
