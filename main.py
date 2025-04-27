@@ -4,6 +4,8 @@ from discord.ext import commands
 from discord import app_commands
 
 import mysql.connector
+from datetime import date
+from decimal import Decimal
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -73,7 +75,7 @@ def db_connection():
 
     return conn
 
-def grab_stats(player: str, map: str, last: int, versus: str, company: str):
+def grab_user_stats(player: str, map: str, last: int, versus: str, company: str):
     with db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
@@ -81,6 +83,8 @@ def grab_stats(player: str, map: str, last: int, versus: str, company: str):
                 *
             FROM
                 hltv_cs
+            JOIN
+                {company}_lines
             WHERE
                 hltv_cs.player_name = '{player}'
             AND
@@ -94,10 +98,19 @@ def grab_stats(player: str, map: str, last: int, versus: str, company: str):
 
         return cursor.fetchall()
     
+def grab_team_stats():
+    ...
+    
 
 async def display_stats(interaction: discord.Interaction, stats_data: list):
+    for each_list in stats_data:
+        for key, value in each_list.items():
+            if isinstance(value, date):
+                each_list[key] = value.isoformat()
+            if isinstance(value, Decimal):
+                each_list[key] = float(value)
     """Display player stats in an organized embed format"""
-    
+    print(json.dumps(stats_data , indent=4))
     # Create embed
     embed = discord.Embed(
         title="📊 CS:GO Player Statistics",
@@ -168,7 +181,7 @@ async def stats(interaction: discord.Interaction, player: str, map: str, last: i
     await interaction.response.defer()
     
     # Get raw stats from database
-    raw_stats = grab_stats(player=player, map=map, last=last, versus=versus, company=company)
+    raw_stats = grab_user_stats(player=player, map=map, last=last, versus=versus, company=company)
     
     # Convert to dictionary format
     formatted_stats = hltv_jsonify(raw_stats)
