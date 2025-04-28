@@ -8,6 +8,7 @@ from datetime import date
 from decimal import Decimal
 from datetime import datetime
 from dotenv import load_dotenv
+from fuzzywuzzy import process
 
 # Globals
 load_dotenv()
@@ -26,15 +27,28 @@ bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 @bot.event
 async def on_ready():
     print(f"🟢 | Bot is live")
-
-
     await bot.tree.sync()
     print(f"🟢 | Bot tree synced")
 
-# Functions
+# Database connection
+def db_connection():
+    conn = mysql.connector.connect(
+        host=HOST,
+        port=PORT,
+        user=USER,
+        password=PASSWORD,
+        database=DATABASE
+    )
+    return conn
+
+# Helper function for fuzzy matching
+def fuzzy_match(input_value: str, options: list[str], threshold: int = 80):
+    match, score = process.extractOne(input_value.lower(), options)
+    return match if score >= threshold else None
+
+# Helper function to format stats
 def hltv_jsonify(all_data: list[tuple]):
     formatted = []
-
     for row in all_data:
         formatted.append({
             "match_url": row[0],
@@ -60,24 +74,19 @@ def hltv_jsonify(all_data: list[tuple]):
             "fk_diff": row[20],
             "rating": row[21]
         })
-    
     return formatted
 
-
-def db_connection():
-    conn = mysql.connector.connect(
-        host=HOST,
-        port=PORT,
-        user=USER,
-        password=PASSWORD,
-        database=DATABASE
-    )
-
-    return conn
-
-def grab_user_stats(player: str, map: str, last: int, versus: str, company: str):
+# Fetch user stats
+def grab_user_stats(player: str, map_filter: list[int], last: int, versus: str, company: str):
     with db_connection() as conn:
         cursor = conn.cursor()
+        # Normalize inputs
+        cursor.execute("SELECT DISTINCT player_name, opponent FROM hltv_cs")
+        all_players, all_opponents = zip(*cursor.fetchall())
+        player = fuzzy_match(player, all_players) or player
+        versus = fuzzy_match(versus, all_opponents) or versus
+        # Query with map_number filter
+        map_condition = f"hltv_cs.map_number IN ({','.join(map(str, map_filter))})"
         cursor.execute(f"""
             SELECT 
                 *
@@ -85,110 +94,130 @@ def grab_user_stats(player: str, map: str, last: int, versus: str, company: str)
                 hltv_cs
             JOIN
                 {company}_lines
+            ON
+                hltv_cs.player_name = {company}_lines.player_name
             WHERE
-                hltv_cs.player_name = '{player}'
+                LOWER(hltv_cs.player_name) = '{player.lower()}'
             AND
-                hltv_cs.opponent = '{versus}'
+                {map_condition}
+            AND
+                LOWER(hltv_cs.opponent) = '{versus.lower()}'
             ORDER BY
-                hltv_cs.date ASC
+                hltv_cs.date DESC
             LIMIT
                 {last}
-
         """)
-
         return cursor.fetchall()
-    
-def grab_team_stats():
-    ...
-    
 
-async def display_stats(interaction: discord.Interaction, stats_data: list):
-    for each_list in stats_data:
-        for key, value in each_list.items():
-            if isinstance(value, date):
-                each_list[key] = value.isoformat()
-            if isinstance(value, Decimal):
-                each_list[key] = float(value)
-    """Display player stats in an organized embed format"""
-    print(json.dumps(stats_data , indent=4))
-    # Create embed
-    embed = discord.Embed(
-        title="📊 CS:GO Player Statistics",
-        color=EMBED_COLOR,
-        timestamp=datetime.now()
-    )
-    
-    # Add match info header
-    embed.add_field(
-        name="🏆 Match Info",
-        value=f"**{stats_data[0]['team']}** vs **{stats_data[0]['opponent']}**\n"
-              f"**Map:** {stats_data[0]['map']} | **Date:** {stats_data[0]['date']}",
-        inline=False
-    )
-    
-    # Process and group players by team
-    teams = {}
-    for player in stats_data:
-        team = player['team']
-        if team not in teams:
-            teams[team] = []
-        teams[team].append(player)
-    
-    # Add stats for each team
-    for team_name, players in teams.items():
-        team_text = []
-        
-        for player in sorted(players, key=lambda x: x['rating'], reverse=True):
-            # Format individual player stats
-            player_line = (
-                f"🔹 **{player['player_name']}**\n"
-                f"• K/D: {player['kills']}/{player['deaths']} ({player['k_d_diff']:+})\n"
-                f"• Rating: {player['rating']:.2f} | ADR: {player['adr']}\n"
-                f"• HS%: {player['headshots']}% | KAST: {player['kast']}%\n"
-                f"• FK Diff: {player['fk_diff']:+}\n"
-            )
-            team_text.append(player_line)
-        
-        embed.add_field(
-            name=f"🧩 {team_name}",
-            value="\n".join(team_text),
-            inline=True
+# Fetch team stats
+def grab_team_stats(team: str, map_filter: list[int], last: int, versus: str):
+    with db_connection() as conn:
+        cursor = conn.cursor()
+        # Normalize inputs
+        cursor.execute("SELECT DISTINCT team, opponent FROM hltv_cs")
+        all_teams, all_opponents = zip(*cursor.fetchall())
+        team = fuzzy_match(team, all_teams) or team
+        versus = fuzzy_match(versus, all_opponents) or versus
+        # Query with map_number filter
+        map_condition = f"hltv_cs.map_number IN ({','.join(map(str, map_filter))})"
+        cursor.execute(f"""
+            SELECT 
+                *
+            FROM
+                hltv_cs
+            WHERE
+                LOWER(team) = '{team.lower()}'
+            AND
+                {map_condition}
+            AND
+                LOWER(opponent) = '{versus.lower()}'
+            ORDER BY
+                date DESC
+            LIMIT
+                {last}
+        """)
+        return cursor.fetchall()
+
+# Helper function to display stats in embeds
+async def display_stats(interaction: discord.Interaction, stats_data: list, title: str):
+    embeds = []
+    for i in range(0, len(stats_data), 5):
+        embed = discord.Embed(
+            title=title,
+            color=EMBED_COLOR,
+            timestamp=datetime.now()
         )
-    
-    # Add footer with additional info
-    embed.set_footer(
-        text=f"Requested by {interaction.user.name}"
-    )
-    
-    # Add thumbnail
-    embed.set_thumbnail(url="https://images-wixmp-ed30a86b8c4ca887773594c2.wixmp.com/f/3e50fc94-a1de-4734-b30c-23be84b8b0b5/ddci66q-9aff9f04-42da-4c5f-a612-007d738caa02.png/v1/fill/w_1280,h_1535/cs_go_icon_by_starkevan_ddci66q-fullview.png?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1cm46YXBwOjdlMGQxODg5ODIyNjQzNzNhNWYwZDQxNWVhMGQyNmUwIiwiaXNzIjoidXJuOmFwcDo3ZTBkMTg4OTgyMjY0MzczYTVmMGQ0MTVlYTBkMjZlMCIsIm9iaiI6W1t7ImhlaWdodCI6Ijw9MTUzNSIsInBhdGgiOiJcL2ZcLzNlNTBmYzk0LWExZGUtNDczNC1iMzBjLTIzYmU4NGI4YjBiNVwvZGRjaTY2cS05YWZmOWYwNC00MmRhLTRjNWYtYTYxMi0wMDdkNzM4Y2FhMDIucG5nIiwid2lkdGgiOiI8PTEyODAifV1dLCJhdWQiOlsidXJuOnNlcnZpY2U6aW1hZ2Uub3BlcmF0aW9ucyJdfQ.OKQTNbSlN9bzcINL0iaWrF2oGw_Fbp2VhE0M6-sqQU4")  # CS:GO logo
-    
-    await interaction.followup.send(embed=embed)
+        for stat in stats_data[i:i+5]:
+            embed.add_field(
+                name=f"Match: {stat['event']} ({stat['date']})",
+                value=(
+                    f"**Map:** {stat['map']} | **Team:** {stat['team']} vs {stat['opponent']}\n"
+                    f"**Player:** {stat['player_name']} | **K/D:** {stat['kills']}/{stat['deaths']} ({stat['k_d_diff']:+})\n"
+                    f"**Rating:** {stat['rating']:.2f} | **ADR:** {stat['adr']}\n"
+                    f"**HS%:** {stat['headshots']}% | **KAST:** {stat['kast']}%\n"
+                    f"[Match Link]({stat['match_url']})"
+                ),
+                inline=False
+            )
+        embed.set_footer(text=f"Requested by {interaction.user.name}")
+        embeds.append(embed)
+
+    # Send all embeds in one message
+    await interaction.followup.send(embeds=embeds)
 
 # Commands
-@bot.tree.command(name="stats", description="A command to display stats of user based on previous matches")
-@app_commands.choices(map=[
-    app_commands.Choice(name="Map1", value="map1"),
-    app_commands.Choice(name="Map1-2", value="map1-2"),
-    app_commands.Choice(name="Map1-3", value="map1-3"),
-])
+@bot.tree.command(name="user-stats", description="Display stats of a specific player")
 @app_commands.choices(company=[
     app_commands.Choice(name="Prizepicks", value="prizepicks"),
     app_commands.Choice(name="Underdog", value="underdog")
+], map=[
+    app_commands.Choice(name="1", value="1"),
+    app_commands.Choice(name="1-2", value="1-2"),
+    app_commands.Choice(name="1-3", value="1-3")
 ])
-async def stats(interaction: discord.Interaction, player: str, map: str, last: int, versus: str, company: str):
-    ...
+async def user_stats(interaction: discord.Interaction, player: str, map: app_commands.Choice[str], last: int, versus: str, company: str):
     await interaction.response.defer()
-    
-    # Get raw stats from database
-    raw_stats = grab_user_stats(player=player, map=map, last=last, versus=versus, company=company)
-    
-    # Convert to dictionary format
-    formatted_stats = hltv_jsonify(raw_stats)
-    
-    # Display using the new embed format
-    await display_stats(interaction, formatted_stats)
+    # Convert map choice to integer or range
+    if map.value == "1":
+        map_filter = [1]
+    elif map.value == "1-2":
+        map_filter = [1, 2]
+    elif map.value == "1-3":
+        map_filter = [1, 2, 3]
+    else:
+        map_filter = []
 
+    raw_stats = grab_user_stats(player=player, map_filter=map_filter, last=last, versus=versus, company=company)
+    if not raw_stats:
+        await interaction.followup.send("No stats found. Please check your inputs.")
+        return
+    formatted_stats = hltv_jsonify(raw_stats)
+    await display_stats(interaction, formatted_stats, title=f"📊 Stats for {player}")
+
+@bot.tree.command(name="team-stats", description="Display stats of a specific team")
+@app_commands.choices(map=[
+    app_commands.Choice(name="1", value="1"),
+    app_commands.Choice(name="1-2", value="1-2"),
+    app_commands.Choice(name="1-3", value="1-3")
+])
+async def team_stats(interaction: discord.Interaction, team: str, map: app_commands.Choice[str], last: int, versus: str):
+    await interaction.response.defer()
+    # Convert map choice to integer or range
+    if map.value == "1":
+        map_filter = [1]
+    elif map.value == "1-2":
+        map_filter = [1, 2]
+    elif map.value == "1-3":
+        map_filter = [1, 2, 3]
+    else:
+        map_filter = []
+
+    raw_stats = grab_team_stats(team=team, map_filter=map_filter, last=last, versus=versus)
+    if not raw_stats:
+        await interaction.followup.send("No stats found. Please check your inputs.")
+        return
+    formatted_stats = hltv_jsonify(raw_stats)
+    await display_stats(interaction, formatted_stats, title=f"📊 Stats for Team {team}")
 
 # Execution
 if __name__ == "__main__":
